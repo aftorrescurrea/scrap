@@ -170,9 +170,70 @@ class WorkerThread(QThread):
             raise
         
         finally:
+            try:
+                # Cerrar sesión haciendo clic en el botón de desconexión antes de cerrar el navegador
+                self.update_status.emit("Cerrando sesión...")
+                
+                # Buscar el botón de desconexión (hay dos posibles elementos en la página)
+                try:
+                    # Intenta primero con el botón principal de desconexión
+                    logout_button = driver.find_element(By.ID, "rn_LogoutLink_4_LogoutLink")
+                    driver.execute_script("arguments[0].click();", logout_button)
+                    self.update_status.emit("Sesión cerrada correctamente")
+                    time.sleep(2)  # Esperar a que se procese el cierre de sesión
+                except:
+                    try:
+                        # Si no funciona, intenta con el segundo botón de desconexión
+                        logout_button = driver.find_element(By.ID, "rn_LogoutLink_8_LogoutLink")
+                        driver.execute_script("arguments[0].click();", logout_button)
+                        self.update_status.emit("Sesión cerrada correctamente")
+                        time.sleep(2)  # Esperar a que se procese el cierre de sesión
+                    except Exception as e:
+                        self.update_status.emit(f"No se pudo cerrar sesión automáticamente: {str(e)}")
+            except Exception as e:
+                self.update_status.emit(f"Error al intentar cerrar sesión: {str(e)}")
+            
+            # Ahora cerramos el navegador
             driver.quit()
             self.update_status.emit("Navegador cerrado")
+
+    def click_and_wait_for_download(self, driver, download_button, timeout=30):
+        """
+        Hace clic en un botón de descarga y espera a que se descargue un nuevo archivo PDF.
+        
+        Args:
+            driver: Instancia del navegador Selenium
+            download_button: Elemento web del botón de descarga
+            timeout: Tiempo máximo de espera en segundos
             
+        Returns:
+            Ruta completa al archivo descargado o None si no se detectó ninguna descarga
+        """
+        # Obtener la lista de archivos PDF antes de la descarga
+        before_files = set([f for f in os.listdir(self.download_dir) if f.endswith('.pdf')])
+        
+        # Hacer clic en el botón de descarga
+        self.update_status.emit(f"Haciendo clic en el botón de descarga...")
+        driver.execute_script("arguments[0].click();", download_button)
+        
+        # Esperar a que aparezca un nuevo archivo PDF en la carpeta
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            current_files = set([f for f in os.listdir(self.download_dir) if f.endswith('.pdf')])
+            new_files = current_files - before_files
+            
+            if new_files:
+                # Esperar un momento para asegurar que la descarga esté completa
+                time.sleep(2)
+                new_file = list(new_files)[0]  # Tomar el primer archivo nuevo
+                self.update_status.emit(f"✓ Descarga detectada: {new_file}")
+                return os.path.join(self.download_dir, new_file)
+            
+            time.sleep(0.5)
+        
+        self.update_status.emit(f"✗ No se detectó descarga automática del PDF después de {timeout} segundos")
+        return None
+
     def descargar_comprobantes(self, driver):
         """
         Método principal para descargar los comprobantes de pago
@@ -275,7 +336,7 @@ class WorkerThread(QThread):
                 nomina_type = comp["nomina_type"]
                 consecutivo = comp["consecutivo"]
                 
-                filename = f"{self.identificacion}_{year}_{month_num:02d}_{nomina_type}_{consecutivo}.pdf"
+                filename = f"{self.identificacion}_{year}_{month_name.lower()}_{nomina_type}_{consecutivo}.pdf"
                 filepath = os.path.join(self.download_dir, filename)
                 
                 progress_pct = int((idx / total) * 100)
@@ -411,15 +472,34 @@ class WorkerThread(QThread):
                     if not success:
                         self.update_status.emit(f"Método 3: Haciendo clic en el botón directamente...")
                         try:
-                            # Hacer clic en el botón directamente
+                            # Usar la nueva función para hacer clic y esperar la descarga
                             button = comp["button"]
-                            driver.execute_script("arguments[0].click();", button)
-                            time.sleep(10)  # Esperar a que se descargue
+                            pdf_path = self.click_and_wait_for_download(driver, button, timeout=40)
                             
-                            # Verificar si se descargó el archivo
-                            if os.path.exists(filepath):
-                                self.update_status.emit(f"✓ Comprobante descargado exitosamente mediante clic directo")
-                                success = True
+                            if pdf_path:
+                                # Si se descargó correctamente, renombrar el archivo
+                                # Usar el nombre del mes con la primera letra en mayúscula
+                                month_capitalized = month_name.lower().capitalize()
+                                
+                                # Crear el nombre en el formato deseado: Nombremes_año_tipo.pdf
+                                new_filename = f"{month_capitalized}_{year}_{nomina_type.lower()}.pdf"
+                                new_filepath = os.path.join(self.download_dir, new_filename)
+                                
+                                try:
+                                    # Verificar si ya existe un archivo con ese nombre
+                                    if os.path.exists(new_filepath):
+                                        # Agregar consecutivo si ya existe
+                                        base, ext = os.path.splitext(new_filepath)
+                                        new_filepath = f"{base}_v{consecutivo}{ext}"
+                                    
+                                    # Renombrar el archivo
+                                    os.rename(pdf_path, new_filepath)
+                                    self.update_status.emit(f"✓ Archivo renombrado: {os.path.basename(pdf_path)} → {os.path.basename(new_filepath)}")
+                                    success = True
+                                except Exception as e:
+                                    self.update_status.emit(f"✗ Error al renombrar el archivo: {str(e)}")
+                                    # Aún consideramos éxito si se descargó aunque no se pueda renombrar
+                                    success = True
                             else:
                                 self.update_status.emit(f"✗ No se detectó descarga automática del PDF")
                         except Exception as e:
@@ -454,7 +534,7 @@ class WorkerThread(QThread):
         except Exception as e:
             self.update_status.emit(f"Error durante la descarga de comprobantes: {str(e)}\n{traceback.format_exc()}")
             raise
-
+        
 
 class CremilApp(QMainWindow):
     def __init__(self):
@@ -462,9 +542,30 @@ class CremilApp(QMainWindow):
         self.initUI()
         self.worker_thread = None
     
+    # Añade este método a la clase CremilApp
+    def get_resource_path(self, relative_path):
+        """
+        Devuelve la ruta del recurso, funciona tanto en desarrollo como en producción
+        """
+        try:
+            # Intentar obtener la ruta de PyInstaller si está disponible
+            base_path = getattr(sys, '_MEIPASS', None)
+            if base_path is None:
+                # Si no estamos en un bundle de PyInstaller, usar la ruta del script
+                base_path = os.path.abspath(os.path.dirname(__file__))
+        except Exception:
+            # En caso de cualquier error, usar la ruta actual
+            base_path = os.path.abspath(".")
+        
+        return os.path.join(base_path, relative_path)
+
     def initUI(self):
         self.setWindowTitle("CREMIL - Descarga de Comprobantes de Pago")
         self.setGeometry(100, 100, 800, 700)
+
+        # Establecer el ícono de la ventana (añade estas líneas)
+        icon_path = self.get_resource_path('icon.ico')
+        self.setWindowIcon(QIcon(icon_path))
         
         # Widget principal
         central_widget = QWidget()
@@ -687,10 +788,42 @@ def main():
     font = QFont("Segoe UI", 9)
     app.setFont(font)
     
-    # Crear y mostrar la ventana principal
+    # Método más directo para establecer el ícono
+    icon_file = 'icon.ico'
+    
+    # Lista de posibles ubicaciones del ícono
+    locations = [
+        # Ubicación relativa
+        icon_file,
+        # Ubicación absoluta donde se ejecuta el script
+        os.path.join(os.path.abspath('.'), icon_file),
+        # Ubicación absoluta en el mismo directorio que el script
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), icon_file),
+    ]
+    
+    # Agregar la ubicación de PyInstaller si estamos en un paquete
+    if getattr(sys, 'frozen', False):
+        # Ejecutando en un bundle
+        locations.append(os.path.join(sys._MEIPASS, icon_file))
+    
+    # Intentar con todas las ubicaciones
+    for loc in locations:
+        print(f"Intentando cargar ícono desde: {loc}")
+        if os.path.exists(loc):
+            print(f"Ícono encontrado en: {loc}")
+            app.setWindowIcon(QIcon(loc))
+            # También establecer el ícono para la ventana principal
+            window = CremilApp()
+            window.setWindowIcon(QIcon(loc))
+            window.show()
+            print("Ícono configurado correctamente")
+            sys.exit(app.exec_())
+    
+    
+    # Si llega aquí, no se encontró el ícono
+    print("No se pudo encontrar el archivo de ícono en ninguna ubicación")
     window = CremilApp()
     window.show()
-    
     sys.exit(app.exec_())
 
 

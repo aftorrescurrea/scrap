@@ -39,11 +39,14 @@ added_data.extend(collect_data_files('webdriver_manager'))
 hidden_imports = collect_submodules('webdriver_manager')
 hidden_imports.extend(['selenium', 'requests', 'PyQt5'])
 
+# Lista de archivos adicionales a incluir
+added_files = [('icon.ico', '.')]
+
 a = Analysis(
     ['cremil_downloader.py'],
     pathex=[],
     binaries=[],
-    datas=added_data,
+    datas=added_data + added_files,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
